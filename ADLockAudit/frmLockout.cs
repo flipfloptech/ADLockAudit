@@ -726,7 +726,7 @@ namespace ADLockAudit
                                 break;
                             }
 
-                            if (_sesh.UserName.ToLower().Contains(szUsername.ToLower()))
+                            if (_sesh.UserName.ToLower() == szUsername.ToLower())
                             {
                                 _results.Add(_sesh);
                             }
@@ -792,7 +792,7 @@ namespace ADLockAudit
                         string szServiceName = _svc.CimInstanceProperties["StartName"].Value as string;
                         if (!string.IsNullOrWhiteSpace(szServiceName))
                         {
-                            if (szServiceName.ToLower().Contains(szUsername.ToLower()))
+                            if (szServiceName.ToLower().StartsWith(szUsername.ToLower()) || szServiceName.ToLower().EndsWith(szUsername.ToLower()))
                             {
                                 _results.Add(_svc);
                             }
@@ -848,7 +848,7 @@ namespace ADLockAudit
                                                                  //*[System[TimeCreated[@SystemTime&gt;='2019-05-28T20:39:29.000Z' and @SystemTime&lt;='2019-05-29T20:39:29.999Z']]]
             string queryDSL = $"<QueryList>\r\n" +
                               $"  <Query Id=\"0\" Path=\"Security\">\r\n" +
-                              $"    <Select Path=\"Security\">*[System[( (EventID &gt;= 4624 and EventID &lt;= 4625)  or EventID=4740 or EventID=6279 or  (EventID &gt;= 528 and EventID &lt;= 529)  or EventID=644) and TimeCreated[@SystemTime&gt;='{dateTimeStart.Value.ToUniversalTime().ToString("o")}' and @SystemTime&lt;='{dateTimeEnd.Value.ToUniversalTime().ToString("o")}']]]</Select>\r\n" +
+                              $"    <Select Path=\"Security\">*[System[( (EventID &gt;= 4624 and EventID &lt;= 4625)  or EventID=4740 or EventID=6279) and TimeCreated[@SystemTime&gt;='{dateTimeStart.Value.ToUniversalTime().ToString("o")}' and @SystemTime&lt;='{dateTimeEnd.Value.ToUniversalTime().ToString("o")}']]]</Select>\r\n" +
                               $"  </Query>\r\n" +
                               $"</QueryList>\r\n";
             if (!string.IsNullOrWhiteSpace(szMachine) && !_cancel.IsCancellationRequested)
@@ -875,7 +875,7 @@ namespace ADLockAudit
                                 break;
                             }
 
-                            if (_prop.Value.ToString().ToLower().Contains(szUsername))
+                            if (_prop.Value.ToString().ToLower() ==  szUsername.ToLower())
                             {
                                 _results.Add(eventdetail);
                                 _Found = true;
