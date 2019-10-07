@@ -206,6 +206,7 @@
             this.clmEventType,
             this.clmEventReason});
             this.lstEvents.FullRowSelect = true;
+            this.lstEvents.HideSelection = false;
             this.lstEvents.Location = new System.Drawing.Point(6, 20);
             this.lstEvents.MultiSelect = false;
             this.lstEvents.Name = "lstEvents";
@@ -215,6 +216,7 @@
             this.lstEvents.TabIndex = 0;
             this.lstEvents.UseCompatibleStateImageBehavior = false;
             this.lstEvents.View = System.Windows.Forms.View.Details;
+            this.lstEvents.SelectedIndexChanged += new System.EventHandler(this.lstEvents_SelectedIndexChanged);
             this.lstEvents.MouseDoubleClick += new System.Windows.Forms.MouseEventHandler(this.lstEvents_MouseDoubleClick);
             // 
             // clmDateTime
@@ -469,6 +471,7 @@
             this.clmSignOnSessionID,
             this.clmSignOnState});
             this.lstSignedOn.FullRowSelect = true;
+            this.lstSignedOn.HideSelection = false;
             this.lstSignedOn.Location = new System.Drawing.Point(6, 20);
             this.lstSignedOn.Name = "lstSignedOn";
             this.lstSignedOn.Size = new System.Drawing.Size(283, 127);
@@ -511,6 +514,7 @@
             this.clmServiceID,
             this.clmServiceState});
             this.lstServices.FullRowSelect = true;
+            this.lstServices.HideSelection = false;
             this.lstServices.Location = new System.Drawing.Point(7, 20);
             this.lstServices.Name = "lstServices";
             this.lstServices.Size = new System.Drawing.Size(283, 127);

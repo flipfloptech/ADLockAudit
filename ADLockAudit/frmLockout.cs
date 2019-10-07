@@ -8,9 +8,14 @@ using System.DirectoryServices.AccountManagement;
 using System.DirectoryServices.ActiveDirectory;
 using System.Drawing;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Xml.Linq;
 
 namespace ADLockAudit
 {
@@ -24,6 +29,12 @@ namespace ADLockAudit
         private Domain machineDomain = null;
         private readonly TreeNode _DomainControllers = null;
         private readonly TreeNode _MemberServers = null;
+        private readonly Dictionary<int, string> _StatusLookup2 = new Dictionary<int, string>() {
+            { unchecked ( 0x00000002 ), "A user logged on to this computer" },
+            { unchecked ( 0x00000010 ), "KDC has no support for PADATA type (pre-authentication data)" },
+            { unchecked ( 0x00000017 ), "Password has expired-- change password to reset" },
+            { unchecked ( 0x00000018 ), "Pre-Authentication information was invalid" }
+        };
         private readonly Dictionary<int, string> _StatusLookup = new Dictionary<int, string>() {
             { unchecked ( 0x00000002 ), "A user logged on to this computer" },
             { unchecked ( 0x00000003 ), "A user or computer logged on to this computer from the network (HASHED) (NETHASHED)" },
@@ -60,7 +71,9 @@ namespace ADLockAudit
             { 4624, "Logon Successful" },
             { 4625, "Logon Failed" }, // use status lookup for reason
             { 4740, "Locked Out User Account" },
-            { 6279, "Locked Out User Account (NPS)" },
+            { 4771, "Kerberos pre-authentication failed" },
+            { 4768, "A Kerberos authentication ticket (TGT) was requested" },
+            { 6279, "Locked Out User Account (NPS)" },//4771,4768
             { 528, "Logon Successful (OK) (2K3)" },
             { 529, "Logon Failed (Unknown Username / Bad Password) (2K3) " },
             { 530, "Logon Failed (Account logon time restriction violation) (2K3)" },
@@ -94,6 +107,54 @@ namespace ADLockAudit
         private void frmLockout_Load(object sender, EventArgs e)
         {
 
+        }
+        private uint TestConnection(string szHostname, int timeout = 120)
+        {
+            int[] _ports = new int[] { 145, 445 };
+            uint _result = 0;
+            if (!string.IsNullOrWhiteSpace(szHostname)) {
+                IPAddress _ipaddress = null;
+                try
+                {
+                    _ipaddress = (IPAddress)Dns.GetHostAddresses(szHostname)[0];
+                }
+                catch { return _result; }
+                //ping host
+                Ping pingSender = new Ping();
+                PingOptions options = new PingOptions();
+                options.DontFragment = true;
+                // Create a buffer of 32 bytes of data to be transmitted.
+                string data = "ADLockAudit";
+                byte[] buffer = Encoding.ASCII.GetBytes(data);
+                PingReply reply = pingSender.Send(_ipaddress, timeout, buffer, options);
+                if (reply.Status == IPStatus.Success)
+                {
+                    _result++;
+                }
+                 //check port connectivity
+                foreach (int _port in _ports)
+                {
+                    try
+                    {
+                        System.Net.Sockets.Socket sock =
+                                new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+                                                              System.Net.Sockets.SocketType.Stream,
+                                                              System.Net.Sockets.ProtocolType.Tcp);
+                        sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, 120);
+                        sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveTimeout, 120);
+                        sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.IpTimeToLive, 128);
+                        sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.DontLinger, true);
+                        sock.Connect(_ipaddress, _port);
+                        if (sock.Connected == true) // Port is in use and connection is successful
+                            _result++;
+                        sock.Close();
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            return _result;
         }
         private bool ControllerEnumeration(Domain enumDomain)
         {
@@ -334,7 +395,7 @@ namespace ADLockAudit
                 lblLocked.Text = _lockedOut.IsAccountLockedOut().ToString();
                 lblEnabled.ForeColor = lblLockoutTime.ForeColor;
                 lblLocked.ForeColor = lblEnabled.ForeColor;
-                SafeUpdateUI(false);
+                SafeUpdateUI(false,true);
                 if (!string.IsNullOrWhiteSpace(_lockedOut.AccountLockoutTime.ToString()))
                 {
                     lblLockoutTime.Text = _lockedOut.AccountLockoutTime.ToString();
@@ -462,6 +523,19 @@ namespace ADLockAudit
                 progressBar.Value = Value;
             }
         }
+        private string FormatXml(string xml)
+        {
+            try
+            {
+                XDocument doc = XDocument.Parse(xml);
+                return doc.ToString();
+            }
+            catch (Exception)
+            {
+                // Handle and throw if fatal exception here; don't just ignore them
+                return xml;
+            }
+        }
         private void SafeSetProgressBarMax(int Value)
         {
             if (progressBar.GetCurrentParent().InvokeRequired)
@@ -512,180 +586,193 @@ namespace ADLockAudit
                     {
                         break;
                     }
-
-                    Status($"Gathering Event Logs ({_machine})");
-                    //get event log
-                    EventRecord[] _records = GetSystemLogs(_machine, _lockedOut.SamAccountName, _cancel);
-                    if (_records.Count() > 0 && !_cancel.IsCancellationRequested)
+                    Status($"Checking System Availability ({_machine})");
+                    if (TestConnection(_machine) > 1)
                     {
-                        Status($"Processing Event Logs ({_machine})");
-                        SafeSetProgressBarMax(progressBar.Maximum + _records.Count());
-                        SafeBeginUpdate(lstEvents);
-                        foreach (EventRecord _rec in _records)
+                        Status($"Gathering Event Logs ({_machine})");
+                        //get event log
+                        EventRecord[] _records = GetSystemLogs(_machine, _lockedOut.SamAccountName, _cancel);
+                        if (_records.Count() > 0 && !_cancel.IsCancellationRequested)
                         {
-                            if (_cancel.IsCancellationRequested)
+                            Status($"Processing Event Logs ({_machine})");
+                            SafeSetProgressBarMax(progressBar.Maximum + _records.Count());
+                            SafeBeginUpdate(lstEvents);
+                            foreach (EventRecord _rec in _records)
                             {
-                                break;
-                            }
-
-                            string[] _eventItemValues = new string[4];
-                            _eventItemValues[0] = _rec.TimeCreated.ToString();
-                            _eventItemValues[1] = _rec.MachineName;
-                            string szEventType = "UNKNOWN";
-                            string szEventReason = "UNKNOWN";
-                            if (_EventTypeLookup.ContainsKey(_rec.Id))
-                            {
-                                szEventType = _EventTypeLookup[_rec.Id];
-                                if (szEventType.EndsWith("(2K3)")) // old events
+                                if (_cancel.IsCancellationRequested)
                                 {
-                                    szEventReason = szEventType.Split(new char[] { '(', ')' })[1];
-                                    szEventType = szEventType.Split(new char[] { '(', ')' })[0].TrimEnd(' ');
+                                    break;
                                 }
-                                else if (_rec.Id == 4625)
+
+                                string[] _eventItemValues = new string[4];
+                                _eventItemValues[0] = _rec.TimeCreated.ToString();
+                                _eventItemValues[1] = _rec.MachineName;
+                                string szEventType = "UNKNOWN";
+                                string szEventReason = "UNKNOWN";
+                                if (_EventTypeLookup.ContainsKey(_rec.Id))
                                 {
-                                    if (_StatusLookup.ContainsKey(Convert.ToInt32(_rec.Properties[7].Value)))
+                                    szEventType = _EventTypeLookup[_rec.Id];
+                                    if (szEventType.EndsWith("(2K3)")) // old events
                                     {
-                                        szEventReason = _StatusLookup[Convert.ToInt32(_rec.Properties[7].Value)];
+                                        szEventReason = szEventType.Split(new char[] { '(', ')' })[1];
+                                        szEventType = szEventType.Split(new char[] { '(', ')' })[0].TrimEnd(' ');
+                                    }
+                                    else if (_rec.Id == 4625)
+                                    {
+                                        if (_StatusLookup.ContainsKey(Convert.ToInt32(_rec.Properties[7].Value)))
+                                        {
+                                            szEventReason = _StatusLookup[Convert.ToInt32(_rec.Properties[7].Value)];
+                                        }
+                                    }
+                                    else if (_rec.Id == 4624)
+                                    {
+                                        if (_StatusLookup.ContainsKey(Convert.ToInt32(_rec.Properties[8].Value)))
+                                        {
+                                            szEventReason = _StatusLookup[Convert.ToInt32(_rec.Properties[8].Value)];
+                                        }
+                                    }
+                                    else if (_rec.Id == 4771)
+                                    {
+                                        if (_StatusLookup2.ContainsKey(Convert.ToInt32(_rec.Properties[4].Value)))
+                                        {
+                                            szEventReason = _StatusLookup2[Convert.ToInt32(_rec.Properties[4].Value)];
+                                        }
                                     }
                                 }
-                                else if (_rec.Id == 4624)
+                                _eventItemValues[2] = szEventType;
+                                _eventItemValues[3] = szEventReason;
+                                ListViewItem _eventItem = new ListViewItem(_eventItemValues)
                                 {
-                                    if (_StatusLookup.ContainsKey(Convert.ToInt32(_rec.Properties[8].Value)))
-                                    {
-                                        szEventReason = _StatusLookup[Convert.ToInt32(_rec.Properties[8].Value)];
-                                    }
+                                    Tag = _rec,
+                                    ToolTipText = _rec.ToXml()
+                                };
+                                SafeAddItem(lstEvents, _eventItem);
+                                SafeSetProgressBarValue(progressBar.Value + 1);
+                            }
+                            SafeEndUpdate(lstEvents);
+                            Status($"Processed Event Logs ({_machine})");
+                            if (_cancel.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            System.Threading.Thread.Sleep(1000);
+                        }
+                        else
+                        {
+                            Status($"No Matching Event Logs ({_machine})");
+                            if (_cancel.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            System.Threading.Thread.Sleep(1000);
+                        }
+                        if (_cancel.IsCancellationRequested)
+                        {
+                            break;
+                        }
+
+                        Status($"Gathering Service Accounts on ({_machine})");
+                        CimInstance[] _Services = GetServices(_machine, _lockedOut.SamAccountName, _cancel);
+                        if (_Services.Count() > 0 && !_cancel.IsCancellationRequested)
+                        {
+                            Status($"Processing Service Accounts ({_machine})");
+                            SafeSetProgressBarMax(progressBar.Maximum + _Services.Count());
+                            SafeBeginUpdate(lstServices);
+                            foreach (CimInstance _svc in _Services)
+                            {
+                                if (_cancel.IsCancellationRequested)
+                                {
+                                    break;
                                 }
+
+                                string[] _eventItemValues = new string[4];
+                                _eventItemValues[0] = _machine;
+                                _eventItemValues[1] = _svc.CimInstanceProperties["Name"].Value.ToString();
+                                _eventItemValues[2] = _svc.CimInstanceProperties["ProcessID"].Value.ToString();
+                                _eventItemValues[3] = _svc.CimInstanceProperties["State"].Value.ToString();
+                                ListViewItem _newItem = new ListViewItem(_eventItemValues)
+                                {
+                                    Tag = _svc
+                                };
+                                SafeAddItem(lstServices, _newItem);
+                                SafeSetProgressBarValue(progressBar.Value + 1);
                             }
-                            _eventItemValues[2] = szEventType;
-                            _eventItemValues[3] = szEventReason;
-                            ListViewItem _eventItem = new ListViewItem(_eventItemValues)
-                            {
-                                Tag = _rec,
-                                ToolTipText = _rec.ToXml()
-                            };
-                            SafeAddItem(lstEvents, _eventItem);
-                            SafeSetProgressBarValue(progressBar.Value + 1);
-                        }
-                        SafeEndUpdate(lstEvents);
-                        Status($"Processed Event Logs ({_machine})");
-                        if (_cancel.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        System.Threading.Thread.Sleep(1000);
-                    }
-                    else
-                    {
-                        Status($"No Matching Event Logs ({_machine})");
-                        if (_cancel.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        System.Threading.Thread.Sleep(1000);
-                    }
-                    if (_cancel.IsCancellationRequested)
-                    {
-                        break;
-                    }
-
-                    Status($"Gathering Service Accounts on ({_machine})");
-                    CimInstance[] _Services = GetServices(_machine, _lockedOut.SamAccountName, _cancel);
-                    if (_Services.Count() > 0 && !_cancel.IsCancellationRequested)
-                    {
-                        Status($"Processing Service Accounts ({_machine})");
-                        SafeSetProgressBarMax(progressBar.Maximum + _Services.Count());
-                        SafeBeginUpdate(lstServices);
-                        foreach (CimInstance _svc in _Services)
-                        {
+                            SafeEndUpdate(lstServices);
+                            Status($"Processed Service Accounts ({_machine})");
                             if (_cancel.IsCancellationRequested)
                             {
                                 break;
                             }
 
-                            string[] _eventItemValues = new string[4];
-                            _eventItemValues[0] = _machine;
-                            _eventItemValues[1] = _svc.CimInstanceProperties["Name"].Value.ToString();
-                            _eventItemValues[2] = _svc.CimInstanceProperties["ProcessID"].Value.ToString();
-                            _eventItemValues[3] = _svc.CimInstanceProperties["State"].Value.ToString();
-                            ListViewItem _newItem = new ListViewItem(_eventItemValues)
-                            {
-                                Tag = _svc
-                            };
-                            SafeAddItem(lstServices, _newItem);
-                            SafeSetProgressBarValue(progressBar.Value + 1);
+                            System.Threading.Thread.Sleep(1000);
                         }
-                        SafeEndUpdate(lstServices);
-                        Status($"Processed Service Accounts ({_machine})");
-                        if (_cancel.IsCancellationRequested)
+                        else
                         {
-                            break;
-                        }
-
-                        System.Threading.Thread.Sleep(1000);
-                    }
-                    else
-                    {
-                        Status($"No Matching Service Accounts ({_machine})");
-                        if (_cancel.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        System.Threading.Thread.Sleep(1000);
-                    }
-                    if (_cancel.IsCancellationRequested)
-                    {
-                        break;
-                    }
-
-                    Status($"Gathering Logged On Users ({_machine})");
-                    ITerminalServicesSession[] _Users = GetUsers(_machine, _lockedOut.SamAccountName, _cancel);
-                    if (_Users.Count() > 0 && !_cancel.IsCancellationRequested)
-                    {
-                        Status($"Processing Logged On Users ({_machine})");
-                        SafeSetProgressBarMax(progressBar.Maximum + _Users.Count());
-                        SafeBeginUpdate(lstSignedOn);
-                        foreach (ITerminalServicesSession _usr in _Users)
-                        {
+                            Status($"No Matching Service Accounts ({_machine})");
                             if (_cancel.IsCancellationRequested)
                             {
                                 break;
                             }
 
-                            string[] _eventItemValues = new string[4];
-                            _eventItemValues[0] = _machine;
-                            _eventItemValues[1] = _usr.LoginTime.ToString();
-                            _eventItemValues[2] = _usr.SessionId.ToString();
-                            _eventItemValues[3] = _usr.ConnectionState.ToString();
-                            ListViewItem _newItem = new ListViewItem(_eventItemValues)
-                            {
-                                Tag = _usr
-                            };
-                            SafeAddItem(lstSignedOn, _newItem);
-                            SafeSetProgressBarValue(progressBar.Value + 1);
+                            System.Threading.Thread.Sleep(1000);
                         }
-                        SafeEndUpdate(lstSignedOn);
-                        Status($"Processed Logged On Users ({_machine})");
                         if (_cancel.IsCancellationRequested)
                         {
                             break;
                         }
 
-                        System.Threading.Thread.Sleep(1000);
+                        Status($"Gathering Logged On Users ({_machine})");
+                        ITerminalServicesSession[] _Users = GetUsers(_machine, _lockedOut.SamAccountName, _cancel);
+                        if (_Users.Count() > 0 && !_cancel.IsCancellationRequested)
+                        {
+                            Status($"Processing Logged On Users ({_machine})");
+                            SafeSetProgressBarMax(progressBar.Maximum + _Users.Count());
+                            SafeBeginUpdate(lstSignedOn);
+                            foreach (ITerminalServicesSession _usr in _Users)
+                            {
+                                if (_cancel.IsCancellationRequested)
+                                {
+                                    break;
+                                }
+
+                                string[] _eventItemValues = new string[4];
+                                _eventItemValues[0] = _machine;
+                                _eventItemValues[1] = _usr.LoginTime.ToString();
+                                _eventItemValues[2] = _usr.SessionId.ToString();
+                                _eventItemValues[3] = _usr.ConnectionState.ToString();
+                                ListViewItem _newItem = new ListViewItem(_eventItemValues)
+                                {
+                                    Tag = _usr
+                                };
+                                SafeAddItem(lstSignedOn, _newItem);
+                                SafeSetProgressBarValue(progressBar.Value + 1);
+                            }
+                            SafeEndUpdate(lstSignedOn);
+                            Status($"Processed Logged On Users ({_machine})");
+                            if (_cancel.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            System.Threading.Thread.Sleep(1000);
+                        }
+                        else
+                        {
+                            Status($"No Matching Logged On Users ({_machine})");
+                            if (_cancel.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            System.Threading.Thread.Sleep(1000);
+                        }
                     }
                     else
                     {
-                        Status($"No Matching Logged On Users ({_machine})");
-                        if (_cancel.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        System.Threading.Thread.Sleep(1000);
+                        Status($"System Unavailable ({_machine})");
                     }
-                    //get services
                     SafeSetProgressBarValue(progressBar.Value + 1);
                 }
                 if (!_cancel.IsCancellationRequested)
@@ -843,12 +930,12 @@ namespace ADLockAudit
         private EventRecord[] GetSystemLogs(string szMachine, string szUsername, CancellationToken _cancel)
         {
             bool _exceptionThrown = false;
-            List<EventRecord> _results = new List<EventRecord>();//4740, 644, 6279
+            List<EventRecord> _results = new List<EventRecord>();//4740, 644, 6279,4771,4768
                                                                  //DateTime.UtcNow.ToString("o")
                                                                  //*[System[TimeCreated[@SystemTime&gt;='2019-05-28T20:39:29.000Z' and @SystemTime&lt;='2019-05-29T20:39:29.999Z']]]
             string queryDSL = $"<QueryList>\r\n" +
                               $"  <Query Id=\"0\" Path=\"Security\">\r\n" +
-                              $"    <Select Path=\"Security\">*[System[( (EventID &gt;= 4624 and EventID &lt;= 4625)  or EventID=4740 or EventID=6279) and TimeCreated[@SystemTime&gt;='{dateTimeStart.Value.ToUniversalTime().ToString("o")}' and @SystemTime&lt;='{dateTimeEnd.Value.ToUniversalTime().ToString("o")}']]]</Select>\r\n" +
+                              $"    <Select Path=\"Security\">*[System[( (EventID &gt;= 4624 and EventID &lt;= 4625)  or EventID=4740 or EventID=4771 or EventID = 4768 or EventID=6279) and TimeCreated[@SystemTime&gt;='{dateTimeStart.Value.ToUniversalTime().ToString("o")}' and @SystemTime&lt;='{dateTimeEnd.Value.ToUniversalTime().ToString("o")}']]]</Select>\r\n" +
                               $"  </Query>\r\n" +
                               $"</QueryList>\r\n";
             if (!string.IsNullOrWhiteSpace(szMachine) && !_cancel.IsCancellationRequested)
@@ -950,13 +1037,13 @@ namespace ADLockAudit
         {
             return (btnRunAnalysis.InvokeRequired);
         }
-        private delegate void SafeCallDelegateUpdateUI(bool Enabled);
-        private void SafeUpdateUI(bool Enabled)
+        private delegate void SafeCallDelegateUpdateUI(bool Enabled, bool Running=false);
+        private void SafeUpdateUI(bool Enabled, bool Running=false)
         {
             if (groupBoxesInvokeRequired() || ViewsInvokeRequired() || LabelsInvokeRequired() || DateTimePickersInvokeRequired() || ButtonsInvokeRequired())
             {
                 SafeCallDelegateUpdateUI d = new SafeCallDelegateUpdateUI(SafeUpdateUI);
-                Invoke(d, new object[] { Enabled });
+                Invoke(d, new object[] { Enabled, Running });
             }
             else
             {
@@ -972,7 +1059,7 @@ namespace ADLockAudit
                 lstSignedOn.Enabled = Enabled;
                 dateTimeStart.Enabled = Enabled;
                 dateTimeEnd.Enabled = Enabled;
-                if (Enabled == false)
+                if (Enabled == false && Running == false)
                 {
                     lblEnabled.Text = "Needs analysis";
                     lblLocked.Text = "Needs analysis";
@@ -1054,9 +1141,14 @@ namespace ADLockAudit
                 if (lstEvents.SelectedItems.Count == 1)
                 {
                     Clipboard.Clear();
-                    Clipboard.SetText((lstEvents.SelectedItems[0].Tag as EventRecord).ToXml());
+                    Clipboard.SetText(FormatXml((lstEvents.SelectedItems[0].Tag as EventRecord).ToXml()));
                 }
             }
+        }
+
+        private void lstEvents_SelectedIndexChanged(object sender, EventArgs e)
+        {
+
         }
     }
 }
